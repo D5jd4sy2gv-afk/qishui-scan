@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#17131f">
+<title>汽水音乐扫码登录</title>
+<style>
+:root{color-scheme:dark;--bg:#100e15;--panel:#1d1925;--line:#393142;--gold:#e8c978;--muted:#b8b0c3}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at top,#30243a 0,#100e15 55%);color:#f7f3fa;font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;min-height:100vh;display:grid;place-items:center;padding:22px}
+main{width:min(100%,440px);background:rgba(29,25,37,.96);border:1px solid var(--line);border-radius:24px;padding:26px;box-shadow:0 20px 70px #0007}
+h1{font-size:24px;margin:0 0 6px} .sub{color:var(--muted);font-size:14px;margin:0 0 22px}
+.qrbox{width:260px;height:260px;max-width:100%;margin:0 auto 18px;background:#fff;border-radius:14px;display:grid;place-items:center;padding:12px;color:#333}
+#qr{max-width:100%;max-height:100%}#qr img,#qr canvas{max-width:100%;height:auto}
+.status{text-align:center;min-height:26px;font-size:14px;color:var(--gold);overflow-wrap:anywhere}
+button{width:100%;border:0;border-radius:12px;padding:13px 16px;font-weight:700;font-size:16px;background:var(--gold);color:#211b11;margin-top:14px}
+button:disabled{opacity:.55} .tip{font-size:13px;color:var(--muted);margin-top:18px}
+details{margin-top:16px;color:var(--muted);font-size:13px}pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:180px;overflow:auto;background:#100e15;padding:10px;border-radius:8px}
+a{color:var(--gold)} .small{font-size:12px;color:var(--muted);text-align:center;margin-top:14px}
+</style>
+</head>
+<body>
+<main>
+<h1>汽水音乐扫码登录</h1>
+<p class="sub">使用页面提示支持的 App 扫描二维码</p>
+<div class="qrbox"><div id="qr">正在申请二维码…</div></div>
+<div id="status" class="status" role="status">正在连接扫码服务…</div>
+<button id="refresh">刷新二维码</button>
+<p class="tip">如果页面提示使用抖音 App，请按二维码页面的官方提示操作。不要把登录凭据或 sessionid 分享给他人。</p>
+<details><summary>接口诊断</summary><pre id="diag">等待请求…</pre></details>
+<p class="small">API：qishui-api-1.onrender.com</p>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js"></script>
+<script>
+(() => {
+  const BASE = "https://qishui-api-1.onrender.com";
+  const $ = id => document.getElementById(id);
+  let token = "", timer = null, busy = false, expiresAt = 0;
+  const statusText = s => { $("status").textContent = s; };
+  const diag = v => { $("diag").textContent = typeof v === "string" ? v : JSON.stringify(v, null, 2); };
+  async function request(path, options={}) {
+    const r = await fetch(BASE + path, { ...options, headers: { "Accept":"application/json", ...(options.headers||{}) }});
+    const txt = await r.text();
+    let data; try { data = JSON.parse(txt); } catch { throw new Error("接口返回的不是 JSON（HTTP "+r.status+"）: "+txt.slice(0,240)); }
+    if (!r.ok) throw new Error("HTTP "+r.status+": "+JSON.stringify(data).slice(0,300));
+    return data;
+  }
+  function stopPoll(){ if(timer) clearTimeout(timer); timer=null; }
+  async function createQR(){
+    if(busy) return; busy=true; stopPoll(); token=""; $("refresh").disabled=true;
+    $("qr").innerHTML="正在申请二维码…"; statusText("正在连接扫码服务…");
+    try {
+      const res = await request("/auth/qrcode");
+      diag(res);
+      const root = res?.data ?? res;
+      const d = root?.data ?? root;
+      token = String(d?.token ?? root?.token ?? "");
+      const qr = String(d?.qrcode ?? root?.qrcode ?? "");
+      const qrUrl = String(d?.qrcode_index_url ?? root?.qrcode_index_url ?? "");
+      const value = qr || qrUrl;
+      if (!value || !token) throw new Error("响应中缺少 token 或 qrcode 字段；请展开“接口诊断”检查 API 返回格式。");
+      $("qr").innerHTML="";
+      if (/^data:image\//i.test(value)) {
+        const img=document.createElement("img"); img.src=value; img.alt="汽水扫码二维码"; $("qr").appendChild(img);
+      } else if (window.QRCode) {
+        const canvas=document.createElement("canvas");
+        await QRCode.toCanvas(canvas, value, {width:230, margin:1, errorCorrectionLevel:"M"});
+        $("qr").appendChild(canvas);
+      } else {
+        $("qr").textContent="二维码库加载失败，请检查网络后刷新。";
+      }
+      expiresAt=Date.now()+120000;
+      statusText("二维码已生成，请使用页面提示的 App 扫码。");
+      poll();
+    } catch(e) {
+      $("qr").textContent="二维码生成失败";
+      statusText("连接失败："+e.message);
+      diag({error:String(e), hint:"如果是 CORS 错误，请在 API 服务端允许此网页来源；也可先在浏览器打开 API /health 检查服务状态。"});
+    } finally {busy=false;$("refresh").disabled=false;}
+  }
+  async function poll(){
+    if(!token) return;
+    if(Date.now()>expiresAt){statusText("二维码可能已过期，请刷新二维码。");return;}
+    try {
+      const res=await request("/auth/qrcode/status", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({token})
+      });
+      diag(res);
+      const root=res?.data??res, d=root?.data??root;
+      const s=String(d?.status??root?.status??"").toLowerCase();
+      if(["confirmed","success","logged_in","logged-in","authorized"].includes(s)){
+        statusText("扫码状态已确认。此页面不保存或展示 sessionid；请检查 API 文档确认后续登录方式。");
+        return;
+      }
+      if(["expired","expire","timeout"].includes(s)){statusText("二维码已过期，请刷新。");return;}
+      if(["cancel","cancelled","canceled","denied","failed","error"].includes(s)){statusText("扫码未完成："+s+"。可刷新重试。");return;}
+      if(["scanned","scaned","waiting_confirm","wait_confirm"].includes(s)) statusText("已扫码，等待手机确认…");
+      else statusText("等待扫码…"+(s ? "（状态："+s+"）" : ""));
+    } catch(e) {
+      statusText("状态查询暂时失败，将重试："+e.message);
+    }
+    timer=setTimeout(poll,2500);
+  }
+  $("refresh").addEventListener("click", createQR);
+  createQR();
+})();
+</script>
+</body>
+</html>
